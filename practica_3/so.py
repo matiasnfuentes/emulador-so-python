@@ -116,7 +116,7 @@ class NewInterruptionHandler(AbstractInterruptionHandler):
     def execute(self, irq):
         currentProgram = irq.parameters
         pid = self.kernel.pcbTable.getNewPID()
-        baseDir = self.kernel.loader.loadProgram(currentProgram)
+        baseDir = self.kernel.loader.loadPage(currentProgram)
         newPcb = Pcb(pid, baseDir, currentProgram)
         log.logger.info("\n Executing program: {name}".format(name=newPcb.path))
         log.logger.info(HARDWARE)

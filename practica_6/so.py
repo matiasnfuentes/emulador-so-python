@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import math
+from random import randint
 
 from hardware import *
 from pcb import *
@@ -60,32 +61,121 @@ class FileSystem():
     def formatDisk(self):
         self.__disk.clear()
 
+    def programSize(self, path):
+        return len(self.__disk.get(path))
 
-class OutOfMemory(Exception):
-    pass
 
+class MemoryManager:
 
-class MemoryManager():
-
-    def __init__(self, frameSize):
-        self._frameSize = frameSize
-        numberOfFrames = int(HARDWARE.memory.size / frameSize)
-        self.__freeFrames = []
-        for i in range(numberOfFrames):
-            self.__freeFrames.append(i)
+    def __init__(self, victimSelectionAlgorithm):
+        self._victimSelectionAlgorithm = victimSelectionAlgorithm
 
     def getFreeFrame(self):
-        try:
-            if self.__freeFrames:
-                return self.__freeFrames.pop(0)
-            else:
-                raise OutOfMemory
-        except OutOfMemory:
-            print("The frame count isn't enough")
+        return self._victimSelectionAlgorithm.getFrame()
 
     def setFreeFrame(self, frameNumber):
-        self.__freeFrames.append(frameNumber)
+        self._victimSelectionAlgorithm.setFreeFrame(frameNumber)
 
+class VictimAlgorithim(Enum):
+    FiFo = 1
+    LRU = 2
+    Clock = 3
+
+class AbstractAlgorithm():
+    def __init__(self, kernel):
+        self._kernel = kernel
+        numberOfFrames = int(HARDWARE.memory.size / self._kernel.frameSize)
+        self._freeFrames = []
+        for i in range(numberOfFrames):
+            self._freeFrames.append(i)
+
+    def getFrame(self):
+        pass
+
+    def setFreeFrame(self, frameNumber):
+        pass
+
+    def updatePageTable(self, pcb, frameNumber):
+        actualPageTable = pcb.pageTable
+        pcb.pageTable = [None if x == frameNumber else x for x in actualPageTable]
+
+class FiFoAlgorithm(AbstractAlgorithm):
+    def __init__(self, kernel):
+        super().__init__(kernel)
+        self._usedFrames = []
+
+    def getFrame(self):
+        if self._freeFrames:
+            number = self._freeFrames.pop(0)
+        else:
+            frame = self._usedFrames.pop(0)
+            number = frame[0]
+            pcb = frame[1]
+            self.updatePageTable(pcb, number)
+        self._usedFrames.append((number, self._kernel.pcbTable.runningPcb))
+        return number
+
+    def setFreeFrame(self, frameNumber):
+        for i, frame in enumerate(self._usedFrames):
+            if frame == frameNumber:
+                self._usedFrames.pop(i)
+                self._freeFrames.append(frameNumber)
+
+class LruAlgorithm(AbstractAlgorithm):
+
+    def __init__(self, kernel):
+        super().__init__(kernel)
+        self._usedFrames = dict()
+
+    def getFrame(self):
+        if self._freeFrames:
+            number = self._freeFrames.pop(0)
+        else:
+            number = HARDWARE.mmu.getLastUsed()
+            pcb = self._usedFrames[number]
+            self.updatePageTable(pcb, number)
+        self._usedFrames[number] = self._kernel.pcbTable.runningPcb
+        return number
+
+    def setFreeFrame(self, frameNumber):
+        self._freeFrames.append(frameNumber)
+        self._usedFrames[frameNumber] = None
+
+class ClockAlgorithm(AbstractAlgorithm):
+    def __init__(self, kernel):
+        super().__init__(kernel)
+        self._usedFrames = dict()
+        self._needle = 0
+
+    def getFrame(self):
+        if self._freeFrames:
+            number = self._freeFrames.pop(0)
+        else:
+            self.updateReferenceBit()
+            while self._usedFrames[self._needle][0]:
+                self._usedFrames[self._needle][0] = False
+                self.moveNeedle()
+
+            pcb = self._usedFrames[self._needle][1]
+            self.updatePageTable(pcb, self._needle)
+
+            number = self._needle
+            self.moveNeedle()
+        self._usedFrames[number] = [True, self._kernel.pcbTable.runningPcb]
+        return number
+
+    def setFreeFrame(self, frameNumber):
+        self.updateReferenceBit()
+        self._freeFrames.append(frameNumber)
+        self._usedFrames[frameNumber] = [True, None]
+
+    def updateReferenceBit(self):
+        uses = HARDWARE.mmu.getUses()
+        for f in uses:
+            self._usedFrames[f][0] = True
+
+    def moveNeedle(self):
+        self._needle = (self._needle + 1) % len(self._usedFrames)
 
 class AbstractScheduler:
 
@@ -344,18 +434,13 @@ class NewInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
         path = irq.parameters[0]
-        program = self.kernel.fileSystem.getProgram(path)
+        programSize = self.kernel.fileSystem.programSize(path)
         priority = irq.parameters[1]
         pid = self.kernel.pcbTable.getNewPID()
-        pagesCount = math.ceil(len(program) / self.kernel.frameSize)
-        pageTable = []
-        for i in range(pagesCount):
-            frame = self.kernel.memoryManager.getFreeFrame()
-            pageTable.append(frame)
+        pagesCount = math.ceil(programSize / self.kernel.frameSize)
+        pageTable = [None] * pagesCount
         newPcb = Pcb(pid, pageTable, path, priority)
-        self.kernel.loader.loadPage(program, pageTable)
         log.logger.info("\n Executing program: {name}".format(name=newPcb.path))
-        log.logger.info(HARDWARE)
         self.kernel.pcbTable.add(newPcb)
         self.runProgramIfPosible(newPcb)
 
@@ -367,10 +452,10 @@ class KillInterruptionHandler(AbstractInterruptionHandler):
         log.logger.info(" Program Finished ")
         pageTable = self.kernel.pcbTable.runningPcb.pageTable
         for p in pageTable:
-            self.kernel.memoryManager.setFreeFrame(p)
+            if p:
+                self.kernel.memoryManager.setFreeFrame(p)
         self.saveProcessState(ProcessState.TERMINATED)
         self.tryToRunReadyQ()
-
 
 class IoInInterruptionHandler(AbstractInterruptionHandler):
 
@@ -389,6 +474,13 @@ class IoOutInterruptionHandler(AbstractInterruptionHandler):
         self.runProgramIfPosible(pcb)
         log.logger.info(self.kernel.ioDeviceController)
 
+class PageFaultInterruptionHandler(AbstractInterruptionHandler):
+
+    def execute(self, irq):
+        page = irq.parameters
+        self.kernel.loader.loadPage(page)
+
+
 
 class Loader:
 
@@ -396,22 +488,31 @@ class Loader:
         self._kernel = kernel
         self._frameSize = frameSize
 
-    def loadProgram(self, instructions, pageTable):
-        for i, instruction in enumerate(instructions):
-            frame = pageTable[math.floor(i / self._frameSize)]
+    def loadPage(self, page):
+        runningPCb = self._kernel.pcbTable.runningPcb
+        path = runningPCb.path
+        program = self._kernel.fileSystem.getProgram(path)
+        i = page * self._frameSize
+        instructionsLoaded = 0
+        frame = self._kernel.memoryManager.getFreeFrame()
+        HARDWARE.mmu.setPageFrame(page, frame)
+        runningPCb.pageTable[page] = frame
+        while i < len(program) and instructionsLoaded < self._frameSize:
             offset = i % self._frameSize
             position = (frame * self._frameSize) + offset
-            HARDWARE.memory.write(position, instructions[i])
+            HARDWARE.memory.write(position, program[i])
+            instructionsLoaded += 1
+            i += 1
+        log.logger.info(HARDWARE)
 
 class Dispatcher:
 
     def load(self, pcb):
         log.logger.info("Dispatcher Load: {pcb}".format(pcb=pcb))
-        HARDWARE.cpu.pc = pcb.pc
-        HARDWARE.mmu.resetTLB()
-        for page, frame in enumerate(pcb.pageTable):
+        pageTable = pcb.pageTable
+        for page, frame in enumerate(pageTable):
             HARDWARE.mmu.setPageFrame(page, frame)
-
+        HARDWARE.cpu.pc = pcb.pc
 
     def save(self, pcb):
         log.logger.info("Dispatcher Save: {pcb}".format(pcb=pcb))
@@ -422,7 +523,7 @@ class Dispatcher:
 # emulates the core of an Operative System
 class Kernel:
 
-    def __init__(self, scheduler, frameSize):
+    def __init__(self, scheduler, frameSize, algorithmType):
         ## setup interruption handlers
         self._newHandler = NewInterruptionHandler(self)
         HARDWARE.interruptVector.register(NEW_INTERRUPTION_TYPE, self._newHandler)
@@ -441,6 +542,11 @@ class Kernel:
 
         statsHandler = StatsInterruptionHandler(self)
         HARDWARE.interruptVector.register(STAT_INTERRUPTION_TYPE, statsHandler)
+
+        pageFaultHandler = PageFaultInterruptionHandler(self)
+        HARDWARE.interruptVector.register(PAGE_FAULT_INTERRUPTION_TYPE, pageFaultHandler)
+
+        self._frameSize = frameSize
 
         ## controls the Hardware's I/O Device
         self._ioDeviceController = IoDeviceController(HARDWARE.ioDevice)
@@ -463,11 +569,18 @@ class Kernel:
         ## Inizializate FileSystem
         self._fileSystem = FileSystem()
 
-        ## Inizializate StatTable
-        self._memoryManager = MemoryManager(frameSize)
+        ## Inizializate Memory Manager
+
+        ALGORITHM = {
+            VictimAlgorithim.FiFo: MemoryManager(FiFoAlgorithm(self)),
+            VictimAlgorithim.LRU: MemoryManager(LruAlgorithm(self)),
+            VictimAlgorithim.Clock: MemoryManager(ClockAlgorithm(self))
+        }
+
+
+        self._memoryManager = ALGORITHM.get(algorithmType)
 
         ## Inizializate FrameSize
-        self._frameSize = frameSize
         HARDWARE.mmu.frameSize = frameSize
 
 

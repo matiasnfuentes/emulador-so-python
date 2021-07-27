@@ -298,7 +298,7 @@ class NewInterruptionHandler(AbstractInterruptionHandler):
         currentProgram = irq.parameters[0]
         priority = irq.parameters[1]
         pid = self.kernel.pcbTable.getNewPID()
-        baseDir = self.kernel.loader.loadProgram(currentProgram)
+        baseDir = self.kernel.loader.loadPage(currentProgram)
         newPcb = Pcb(pid, baseDir, currentProgram, priority)
         log.logger.info("\n Executing program: {name}".format(name=newPcb.path))
         log.logger.info(HARDWARE)
