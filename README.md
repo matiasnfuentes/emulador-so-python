@@ -11,4 +11,6 @@ El objetivo del proyecto es modelar un emulador de un Sistema Operativo implemen
  3.  [Entrega 3](https://github.com/matiasnfuentes/emulador-so-python/blob/master/practica_3/README.md)
  4. [Entrega 4](https://github.com/matiasnfuentes/emulador-so-python/blob/master/practica_4/README.md)
  5. [Entrega 5](https://github.com/matiasnfuentes/emulador-so-python/blob/master/practica_5/README.md)
+ 6. [Entrega 6](https://github.com/matiasnfuentes/emulador-so-python/blob/master/practica_6/README.md)
+
 
